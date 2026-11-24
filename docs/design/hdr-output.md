@@ -68,10 +68,10 @@ linear segment below 0.04045]. Values above 1 are left as they are.
 
 ## Settings (Display page)
 
-**HDR output**: Off, HDR10, HDR 16-bit [design: PR #3348 review, "a lot of settings"]. The
+**HDR output**: Off, HDR10, HDR 16-bit, Calibrate... [design: PR #3348 review, "a lot of settings"]. The
 INI keeps it as `HDR10;peak=1000;paper=200` (`peak=0`: the screen's own; an old `On` loads as
-HDR10). The row below it, **Calibrate HDR** (`hdr-calibrate`), is one action, Calibrate...,
-greyed while HDR output is not active; it opens the calibration below and keeps nothing itself.
+HDR10). Calibrate... keeps no state of its own: it opens the calibration below (a corner message
+says so when HDR output is off).
 
 - **HDR10**: an `Rgb10a2Unorm` surface in BT.2100 PQ. The window blit converts the scaled scRGB
   to Rec.2020 primaries and ST 2084 PQ, with a dither of one 10-bit code value so skies do not

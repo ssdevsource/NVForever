@@ -71,17 +71,22 @@ fn set_wanted(on: bool) {
 
 /// The corner message that says what the screen shows, each time it changes after the start:
 /// HDR with its peak and paper white, SDR, or HDR asked for on a screen that offers none.
-fn announce(mut last: Local<Option<(bool, bool)>>, messages: Option<ResMut<nvf_play::corner_messages::CornerMessages>>) {
-    let now = (on(), bevy::render::view::window::NVF_HDR_SURFACE_ACTIVE.load(Relaxed));
+fn announce(mut last: Local<Option<(bool, bool, bool)>>, messages: Option<ResMut<nvf_play::corner_messages::CornerMessages>>) {
+    let pq = bevy::render::view::window::NVF_HDR_PQ.load(Relaxed);
+    let now = (on(), bevy::render::view::window::NVF_HDR_SURFACE_ACTIVE.load(Relaxed), pq);
     if !bevy::render::view::window::NVF_HDR_SURFACE_DECIDED.load(Relaxed) || *last == Some(now) {
         return;
     }
     let first = last.is_none();
     *last = Some(now);
     let text = match now {
-        (_, true) => format!("HDR on: scRGB, peak {} nits, paper white {} nits", peak_nits(), paper_nits()),
-        (true, false) => "HDR asked for, but this screen offers no HDR (Windows HDR off?)".to_string(),
-        (false, false) => "HDR off: SDR output".to_string(),
+        (_, true, true) => format!("HDR on: HDR10, peak {} nits, paper white {} nits", peak_nits(), paper_nits()),
+        (_, true, false) if bevy::render::view::window::NVF_HDR_PQ_WANTED.load(Relaxed) => {
+            format!("HDR10 not offered by this screen: HDR 16-bit (scRGB), peak {} nits, paper white {} nits", peak_nits(), paper_nits())
+        }
+        (_, true, false) => format!("HDR on: HDR 16-bit (scRGB), peak {} nits, paper white {} nits", peak_nits(), paper_nits()),
+        (true, false, _) => "HDR asked for, but this screen offers no HDR (Windows HDR off?)".to_string(),
+        (false, false, _) => "HDR off: SDR output".to_string(),
     };
     info!("hdr: {text}");
     if let Some(mut m) = messages {
@@ -282,21 +287,25 @@ impl Plugin for HdrPlugin {
                 key: "hdr-output",
                 group: "Display",
                 label: "HDR output",
-                note: "For an HDR screen (Windows HDR on), at once. HDR10: 10-bit, works with frame generation. HDR 16-bit: finer steps, no frame generation on Vulkan.",
+                note: "For an HDR screen (Windows HDR on), at once. HDR10: 10-bit, works with frame generation. HDR 16-bit: finer steps, no frame generation on Vulkan. Calibrate... sets the peak and brightness.",
                 switches: "",
                 get: |_| false,
                 set: |_, _| {},
                 slider: None,
             },
             ChoiceList {
-                names: |_| [OFF, HDR10, BIT16].map(String::from).to_vec(),
+                names: |_| [OFF, HDR10, BIT16, CALIBRATE].map(String::from).to_vec(),
                 chosen: |_| choice().to_string(),
-                pick: |_, name| match name {
+                pick: |w, name| match name {
                     OFF | HDR10 | BIT16 => {
                         if name != OFF {
                             bevy::render::view::window::NVF_HDR_PQ_WANTED.store(name == HDR10, Relaxed);
                         }
                         set_wanted(name != OFF);
+                        true
+                    }
+                    CALIBRATE => {
+                        w.insert_resource(crate::hdr_calibrate::Asked);
                         true
                     }
                     _ => false,
@@ -306,37 +315,7 @@ impl Plugin for HdrPlugin {
                 ask_keep: false,
             },
         );
-        // Its own row under HDR output, greyed while HDR output is not active.
-        add_choice_list(
-            app,
-            Setting {
-                key: "hdr-calibrate",
-                group: "Display",
-                label: "Calibrate HDR",
-                note: "Two pictures that set the screen's peak and the brightness. Needs HDR output on.",
-                switches: "",
-                get: |_| false,
-                set: |_, _| {},
-                slider: None,
-            },
-            ChoiceList {
-                names: |_| vec![CALIBRATE.to_string()],
-                chosen: |_| CALIBRATE.to_string(),
-                pick: |w, name| {
-                    if name == CALIBRATE {
-                        w.insert_resource(crate::hdr_calibrate::Asked);
-                        true
-                    } else {
-                        false
-                    }
-                },
-                save: |_| String::new(),
-                load: |_, _| true,
-                ask_keep: false,
-            },
-        );
-        set_choice_action(app, "hdr-calibrate", |name| name == CALIBRATE);
-        nvf_play::settings::set_disabled_status(app, "hdr-calibrate", |_| (!bevy::render::view::window::NVF_HDR_SURFACE_ACTIVE.load(Relaxed)).then_some("Off (HDR output is off)"));
+        set_choice_action(app, "hdr-output", |name| name == CALIBRATE);
         if std::env::var("NVF_HDR").is_ok_and(|v| v.trim() == "1") {
             bevy::render::view::window::NVF_HDR_SURFACE.store(true, Relaxed);
         }
