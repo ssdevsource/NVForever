@@ -3,11 +3,12 @@
 //! (`nvf_play::pause::FormOver`: the page under it takes no key or click), as most games
 //! calibrate HDR [design: PR #3348 review]:
 //!
-//! 1. **Peak brightness**: a white field at the peak being set, with the NVForever logo on it
-//!    in white at 10,000 nits. Raise the peak until the logo just disappears: the field is
-//!    then as bright as the screen goes, and light brighter than that is never asked for.
-//! 2. **Brightness**: a black field with the logo in dark grey (3 % of paper white). Raise
-//!    the brightness until the logo can just be seen. It sets paper white, how bright the
+//! 1. **Peak brightness**: a white field at 10,000 nits (the screen shows its maximum), with
+//!    the NVForever logo on it in white at the peak being set. Raise the peak until the logo
+//!    just disappears: when the logo reaches the screen's peak it clips like the field, so
+//!    it is then as bright as the screen goes, and light brighter than that is never asked for.
+//! 2. **Brightness**: a black field with the logo in near black (0.3 % of paper white, about
+//!    the game's darkest shadow detail). Raise the brightness until the logo can just be seen. It sets paper white, how bright the
 //!    picture's white and the HUD look.
 //!
 //! Left and Right (the D-pad) move the value, Enter goes on (Done on the second), Backspace
@@ -33,10 +34,12 @@ use std::sync::atomic::Ordering::Relaxed;
 #[derive(Resource)]
 pub struct Asked;
 
-/// The logo's brightness on the peak picture, nits: above any screen's peak [design].
-const LOGO_PEAK_NITS: f32 = 10_000.0;
-/// The logo's brightness on the black picture, a part of paper white [design].
-const LOGO_DARK: f32 = 0.03;
+/// The field's brightness on the peak picture, nits: above any screen's peak, so it always
+/// shows the screen's maximum [design].
+const FIELD_PEAK_NITS: f32 = 10_000.0;
+/// The logo's brightness on the black picture, a part of paper white: about the game's
+/// darkest shadow detail (sRGB code 10 of 255, decoded) [design].
+const LOGO_DARK: f32 = 0.003;
 /// One press's step, nits: the peak and the brightness [design].
 const PEAK_STEP: u32 = 50;
 const PAPER_STEP: u32 = 10;
@@ -275,8 +278,8 @@ fn draw(mut commands: Commands, mut c: ResMut<Calibration>, roots: Query<Entity,
     let (field, logo, title, value, hint) = match c.step {
         Step::Closed => return,
         Step::Peak => (
+            at_nits(FIELD_PEAK_NITS),
             at_nits(c.peak as f32),
-            at_nits(LOGO_PEAK_NITS),
             "HDR calibration 1 of 2: peak brightness",
             format!("Peak brightness: {} nits", c.peak),
             "Raise it until the logo just disappears into the white.",
@@ -286,7 +289,7 @@ fn draw(mut commands: Commands, mut c: ResMut<Calibration>, roots: Query<Entity,
             at_nits(LOGO_DARK * paper),
             "HDR calibration 2 of 2: brightness",
             format!("Brightness: {} nits", paper as u32),
-            "Raise it until the logo can just be seen on the black.",
+            "Raise it until the logo can just be seen.",
         ),
     };
     let full = Node { position_type: PositionType::Absolute, width: Val::Percent(100.0), height: Val::Percent(100.0), flex_direction: FlexDirection::Column, justify_content: JustifyContent::Center, align_items: AlignItems::Center, ..default() };

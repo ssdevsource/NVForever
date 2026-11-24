@@ -28,7 +28,11 @@ fn bright(in: FullscreenVertexOutput) -> @location(0) vec4<f32> {
     var c = vec3(0.0);
     for (var i = 0; i < 4; i++) {
         let o = vec2(f32(i & 1) * 2.0 - 1.0, f32(i >> 1u) * 2.0 - 1.0) * texel;
-        c += textureSampleLevel(source, source_sampler, in.uv + o, 0.0).rgb;
+        // Each pixel held to the SDR range before it is averaged: with HDR output the
+        // picture holds light 10 to 50 times white, and the quarter-size blur spreads those
+        // few pixels into blocks. Nothing changes in SDR, whose picture is at most 1.
+        let s = textureSampleLevel(source, source_sampler, in.uv + o, 0.0).rgb;
+        c += s * min(1.0, 1.0 / max(max(s.r, max(s.g, s.b)), 1e-4));
     }
     c *= 0.25;
     // A soft knee around the threshold, scaled by how far the brightest channel is over.
