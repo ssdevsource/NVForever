@@ -68,13 +68,21 @@ linear segment below 0.04045]. Values above 1 are left as they are.
 
 ## Settings (Display page)
 
-One row, **HDR output**: Off, On, Calibrate... [design: PR #3348 review, "a lot of
-settings"]. Calibrate... keeps no state of its own: it opens the calibration below. The INI
-keeps the row as `On;peak=1000;paper=200` (`peak=0`: the screen's own).
+**HDR output**: Off, HDR10, HDR 16-bit [design: PR #3348 review, "a lot of settings"]. The
+INI keeps it as `HDR10;peak=1000;paper=200` (`peak=0`: the screen's own; an old `On` loads as
+HDR10). The row below it, **Calibrate HDR** (`hdr-calibrate`), is one action, Calibrate...,
+greyed while HDR output is not active; it opens the calibration below and keeps nothing itself.
+
+- **HDR10**: an `Rgb10a2Unorm` surface in BT.2100 PQ. The window blit converts the scaled scRGB
+  to Rec.2020 primaries and ST 2084 PQ, with a dither of one 10-bit code value so skies do not
+  band. DLSS frame generation works on it [observed 2026-11-24, owner]. If the surface offers
+  no `Rgb10a2Unorm` with PQ, the game logs it and uses 16-bit.
+- **HDR 16-bit**: an `Rgba16Float` surface in scRGB: finer steps, but DLSS frame generation
+  does not run on it on Vulkan (see Limitations). `NVF_HDR=1` asks for HDR10.
 
 | Value | Range | Default | Set by |
 | --- | --- | --- | --- |
-| Peak brightness | Auto, 400 to 4000 nits | Auto | calibration step 1 |
+| Peak brightness | Auto, 400 to 10,000 nits | Auto | calibration step 1 |
 | Brightness (paper white, the HUD with it) | 80 to 400 nits | 200 | calibration step 2 |
 
 No row sets the rest, which keep these values: the 0..1 range decoded with gamma 2.2,
@@ -89,12 +97,17 @@ HDR. Left and Right move the value, Enter goes on, Backspace back, Esc puts both
    NVForever logo (the word "NVForever") on it at the peak being set. Raised until the logo
    just disappears into the white: the logo then reaches the screen's peak and clips like the
    field.
-2. **Brightness**: a black field, the logo in near black (0.3 % of paper white, about the
-   game's darkest shadow detail, sRGB code 10 of 255 decoded). Raised until the logo can just
+2. **Brightness**: a black field, the logo in near black (1 % of paper white; 0.3 % was never
+   visible and 3 % always was). Raised until the logo can just
    be seen. It sets paper white and the HUD's white together.
 
-The pictures are interface nodes in scRGB; the window blit scales them by the HUD's white,
-so a value v shows at v x paper white. Without an HDR surface a corner message says so and
+On a screen that rolls off its highlights the logo can vanish well above the reported peak
+(observed about 2000 nits on a 616-nit laptop panel, 2026-11-24); Auto (the reported peak) stays
+the default until the player calibrates.
+
+The pictures are interface nodes in the fp16 main texture; the window blit scales them by the
+HUD's white, so a value v shows at v x paper white, in HDR10 and 16-bit alike (the field at
+10,000 nits is scRGB 125.0 or PQ 1.0; a unit test checks both give the same nits). Without an HDR surface a corner message says so and
 nothing opens.
 
 Every default and range is a design choice [design]. Paper white 200 nits is near ITU-R
@@ -134,6 +147,13 @@ expansion at 50 % the brightest clouds rose 25 to 50 % into the room.
 
 ## Not done
 
+- Frame generation with 16-bit HDR: DLSS-G (Streamline 2.14.16, Vulkan, driver 616.64) accepts the
+  fp16 scRGB swapchain (`cloneFakeBuffers ... format=97`) and reports `eOk` with its mode on, but
+  presents one frame per real frame; its verbose log never reaches "interpolation state changed
+  from disabled to enabled", which it logs in SDR [observed 2026-11-24, RTX 5080 laptop]. The
+  tagged HUD-less copy and UI colour now match the HDR back buffer (`dlss/frame_gen.rs`:
+  `Rgba16Float`, the window blit's gamma and scale), which did not change it. An HDR10 (PQ,
+  `A2B10G10R10`) swapchain does present generated frames, so HDR10 is the default.
+
 - Wide gamut: the output stays within Rec.709 primaries (the game's content is sRGB).
-- An HDR10 (PQ) swapchain: scRGB only; Windows converts for the screen.
 - Exclusive full screen: not tested with HDR.

@@ -185,6 +185,8 @@ struct Applied {
     render: UVec2,
     output: UVec2,
     back_buffers: u32,
+    /// The back buffer is fp16 scRGB (HDR output): the buffer formats are told to DLSS-G.
+    hdr: bool,
 }
 
 /// What [`tag`] found for this frame, for [`options`].
@@ -212,7 +214,7 @@ impl Hudless {
                 mip_level_count: 1,
                 sample_count: 1,
                 dimension: wgpu::TextureDimension::D2,
-                format: ENCODED_FORMAT,
+                format: encoded_format(),
                 usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
                 view_formats: &[],
             })
@@ -254,6 +256,8 @@ struct FrameGen {
     constants: Option<u32>,
     decision: Option<Decision>,
     hudless: Option<Hudless>,
+    /// [`encoding_key`] the HUD-less copy, the UI colour and their passes were built for.
+    encoding: (u32, bool, bool),
     kept: VecDeque<(Vec<wgpu::Texture>, Vec<wgpu::TextureView>)>,
     last_state_line: Option<Instant>,
     period: Option<Period>,
@@ -318,7 +322,7 @@ struct Fullscreen {
 impl Fullscreen {
     /// `body` after [`COMMON_WGSL`] (the vertex stage and `encode`); `inputs` textures.
     fn new(device: &wgpu::Device, label: &'static str, body: &str, inputs: u32, format: wgpu::TextureFormat) -> Self {
-        let source = format!("{COMMON_WGSL}{body}");
+        let source = format!("{}{body}", common_wgsl());
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor { label: Some(label), source: wgpu::ShaderSource::Wgsl(source.into()) });
         let entries: Vec<wgpu::BindGroupLayoutEntry> = (0..inputs)
             .map(|binding| wgpu::BindGroupLayoutEntry {
@@ -397,6 +401,7 @@ const ENCODED_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
 
 /// The full-screen vertex stage and the sRGB encoding (IEC 61966-2-1), in every pass here.
 const COMMON_WGSL: &str = "
+const ENC_MAX: f32 = 1.0;
 @vertex
 fn vertex(@builtin(vertex_index) index: u32) -> @builtin(position) vec4<f32> {
     let uv = vec2<f32>(f32((index << 1u) & 2u), f32(index & 2u));
@@ -408,6 +413,74 @@ fn encode(c: vec3<f32>) -> vec3<f32> {
     return select(1.055 * pow(x, vec3<f32>(1.0 / 2.4)) - 0.055, x * 12.92, x <= vec3<f32>(0.0031308));
 }
 ";
+
+/// HDR output (fp16 scRGB back buffer): [`ENCODED_FORMAT`] becomes `Rgba16Float` and `encode`
+/// is the window blit's own map (vendored `blit.wesl`: 0..1 encoded with sRGB's curve and decoded
+/// with gamma 2.2, above 1 kept, times the HUD's white nits over scRGB's 80), so the HUD-less
+/// copy and the UI colour hold what the back buffer holds: DLSS-G wants them "same color space
+/// ... as the color back buffer" [documented: `ProgrammingGuideDLSS_G.md` §5.1].
+fn hdr_nits() -> u32 {
+    bevy::core_pipeline::upscaling::nvf_hdr_paper_white()
+}
+
+/// What the encoding passes and buffers were built for: the HUD's nits (0: SDR) and the gamma.
+fn encoding_key() -> (u32, bool, bool) {
+    (hdr_nits(), bevy::core_pipeline::upscaling::NVF_HDR_GAMMA22.load(Ordering::Relaxed), hdr_pq())
+}
+
+/// The HDR surface is BT.2100 PQ (`Rgb10a2Unorm`, the HDR row's HDR10), not fp16 scRGB.
+fn hdr_pq() -> bool {
+    hdr_nits() > 0 && bevy::render::view::window::NVF_HDR_PQ.load(Ordering::Relaxed)
+}
+
+fn encoded_format() -> wgpu::TextureFormat {
+    if hdr_pq() {
+        wgpu::TextureFormat::Rgb10a2Unorm
+    } else if hdr_nits() > 0 {
+        wgpu::TextureFormat::Rgba16Float
+    } else {
+        ENCODED_FORMAT
+    }
+}
+
+/// [`COMMON_WGSL`], or its HDR form while the back buffer is scRGB.
+fn common_wgsl() -> String {
+    let (nits, gamma22, pq) = encoding_key();
+    if nits == 0 {
+        return COMMON_WGSL.to_string();
+    }
+    // PQ: the scaled scRGB (1.0 = 80 nits) to BT.2020 and SMPTE ST 2084, as `blit.wesl`'s `NVF_HDR_PQ`.
+    let (max, tail) = if pq {
+        (
+            "1.0",
+            "let q = max(d * SCALE, vec3<f32>(0.0));
+    let p = vec3<f32>(dot(q, vec3<f32>(0.627404, 0.329283, 0.043313)), dot(q, vec3<f32>(0.069097, 0.919540, 0.011362)), dot(q, vec3<f32>(0.016391, 0.088013, 0.895595)));
+    let y = pow(clamp(p * (80.0 / 10000.0), vec3<f32>(0.0), vec3<f32>(1.0)), vec3<f32>(0.1593017578125));
+    return clamp(pow((0.8359375 + 18.8515625 * y) / (1.0 + 18.6875 * y), vec3<f32>(78.84375)), vec3<f32>(0.0), vec3<f32>(1.0));",
+        )
+    } else {
+        ("65504.0", "return min(d * SCALE, vec3<f32>(ENC_MAX));")
+    };
+    let tail = tail.replace("SCALE", &format!("{:?}", nits as f32 / 80.0));
+    let decode = if gamma22 { "pow(e, vec3<f32>(2.2))" } else { "x" };
+    format!(
+        "
+const ENC_MAX: f32 = {max};
+@vertex
+fn vertex(@builtin(vertex_index) index: u32) -> @builtin(position) vec4<f32> {{
+    let uv = vec2<f32>(f32((index << 1u) & 2u), f32(index & 2u));
+    return vec4<f32>(uv * 2.0 - 1.0, 0.0, 1.0);
+}}
+
+fn encode(c: vec3<f32>) -> vec3<f32> {{
+    let x = clamp(c, vec3<f32>(0.0), vec3<f32>(1.0));
+    let e = select(1.055 * pow(x, vec3<f32>(1.0 / 2.4)) - 0.055, x * 12.92, x <= vec3<f32>(0.0031308));
+    let d = select(max(c, vec3<f32>(0.0)), {decode}, c <= vec3<f32>(1.0));
+    {tail}
+}}
+"
+    )
+}
 
 /// The HUD-less copy: the frame before the UI, sRGB-encoded ([`ENCODED_FORMAT`]).
 const HUDLESS_WGSL: &str = "
@@ -440,7 +513,7 @@ fn fragment(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> {
     }
     let f = encode(textureLoad(final_color, p, 0).rgb);
     let h = textureLoad(hudless, p, 0).rgb;
-    return vec4<f32>(clamp(f - (1.0 - a) * h, vec3<f32>(0.0), vec3<f32>(1.0)), a);
+    return vec4<f32>(clamp(f - (1.0 - a) * h, vec3<f32>(0.0), vec3<f32>(ENC_MAX)), a);
 }
 ";
 
@@ -495,6 +568,7 @@ impl FrameGen {
             constants: None,
             decision: None,
             hudless: None,
+            encoding: (0, true, false),
             kept: VecDeque::new(),
             last_state_line: None,
             period: None,
@@ -654,6 +728,11 @@ fn fill_sizes(options: &mut DlssgOptions, applied: Applied) {
     options.color_height = applied.output.y;
 }
 
+/// `VK_FORMAT_R16G16B16A16_SFLOAT`.
+const VK_FORMAT_RGBA16F: u32 = 97;
+/// `VK_FORMAT_A2B10G10R10_UNORM_PACK32`: the HDR10 back buffer (`Rgb10a2Unorm`).
+const VK_FORMAT_A2B10G10R10: u32 = 64;
+
 /// The options for `applied` (stage 2): on or off with resources kept, the frames, the sizes;
 /// no dynamic resolution, the default queue parallelism.
 fn options_for(applied: Applied) -> DlssgOptions {
@@ -665,6 +744,13 @@ fn options_for(applied: Applied) -> DlssgOptions {
     }
     options.num_frames_to_generate = applied.frames;
     fill_sizes(&mut options, applied);
+    if applied.hdr {
+        // `VK_FORMAT_R16G16B16A16_SFLOAT`: the scRGB back buffer and the copies tagged for it.
+        let format = if hdr_pq() { VK_FORMAT_A2B10G10R10 } else { VK_FORMAT_RGBA16F };
+        options.color_buffer_format = format;
+        options.hud_less_buffer_format = format;
+        options.ui_buffer_format = format;
+    }
     options
 }
 
@@ -802,6 +888,15 @@ fn tag_inputs(
     motion_view: &wgpu::TextureView,
 ) -> bool {
     let device = ctx.render_device().wgpu_device().clone();
+    // The back buffer's format or the HUD's white changed (HDR on or off, calibration): the
+    // copies and passes are built again for it.
+    if fg.encoding != encoding_key() {
+        fg.encoding = encoding_key();
+        fg.hudless = None;
+        fg.ui_colour = None;
+        fg.hudless_pass = None;
+        fg.ui_colour_pass = None;
+    }
     if fg.hudless.as_ref().is_none_or(|h| h.textures[0].size() != main.size()) {
         fg.hudless = Some(Hudless::new(&device, main.size(), "dlssg_hudless"));
     }
@@ -828,7 +923,7 @@ fn tag_inputs(
         return false;
     };
     {
-        let pass = fg.hudless_pass.get_or_insert_with(|| Fullscreen::new(&device, "dlssg_hudless", HUDLESS_WGSL, 1, ENCODED_FORMAT));
+        let pass = fg.hudless_pass.get_or_insert_with(|| Fullscreen::new(&device, "dlssg_hudless", HUDLESS_WGSL, 1, encoded_format()));
         let encoder = ctx.command_encoder();
         pass.draw(&device, encoder, &[main_view], &hudless_view);
         let transition = |texture, state| wgpu::TextureTransition { texture, selector: None, state };
@@ -875,7 +970,7 @@ fn wanted(fg: &FrameGen, decision: Option<Decision>) -> Applied {
     let last = fg.applied;
     let (render, output) = decision.map(|d| (d.render, d.output)).or(last.map(|a| (a.render, a.output))).unwrap_or_default();
     let on = decision.is_some_and(|d| d.generate) && fg.status_failed.is_none() && !fg.window_off && fg.loaded && !fg.exiting;
-    Applied { on, frames: fg.requested_frames.clamp(1, fg.max_frames.max(1)), render, output, back_buffers }
+    Applied { on, frames: fg.requested_frames.clamp(1, fg.max_frames.max(1)), render, output, back_buffers, hdr: hdr_nits() > 0 }
 }
 
 /// Whether the options must be set: they differ, except that off stays off whatever the sizes.
@@ -1040,7 +1135,7 @@ fn ui_buffer(
             if !fg.ui_said {
                 fg.ui_said = true;
                 let what = if layer {
-                    format!("{ENCODED_FORMAT:?} UI colour and alpha (the UI drawn alone over transparent black, premultiplied, sRGB-encoded as the back buffer with the HUD-less copy)")
+                    format!("{:?} UI colour and alpha (the UI drawn alone over transparent black, premultiplied, encoded as the back buffer with the HUD-less copy)", encoded_format())
                 } else {
                     "R16Float UI alpha (1 where the frame differs from its HUD-less copy, 0 elsewhere)".to_string()
                 };
@@ -1107,7 +1202,7 @@ fn draw_ui_layer(
     };
     let Some(mut ui_res) = described else { return Err("the UI colour and alpha has no Vulkan handle".to_string()) };
     crate::fg_ui_layer::draw(world, ui, camera, ctx, &layer_view)?;
-    let pass = fg.ui_colour_pass.get_or_insert_with(|| Fullscreen::new(&device, "dlssg_ui_color_alpha", UI_COLOUR_WGSL, 3, ENCODED_FORMAT));
+    let pass = fg.ui_colour_pass.get_or_insert_with(|| Fullscreen::new(&device, "dlssg_ui_color_alpha", UI_COLOUR_WGSL, 3, encoded_format()));
     let encoder = ctx.command_encoder();
     pass.draw(&device, encoder, &[main_view, hudless_view, &layer_view], &ui_view);
     encoder.transition_resources(std::iter::empty(), std::iter::once(wgpu::TextureTransition { texture: &ui_texture, selector: None, state: wgpu::TextureUses::RESOURCE }));
@@ -1582,7 +1677,7 @@ mod tests {
 
     #[test]
     fn the_on_options_carry_frames_sizes_and_back_buffers() {
-        let applied = Applied { on: true, frames: 3, render: UVec2::new(853, 480), output: UVec2::new(1280, 720), back_buffers: 3 };
+        let applied = Applied { on: true, frames: 3, render: UVec2::new(853, 480), output: UVec2::new(1280, 720), back_buffers: 3, hdr: false };
         let o = options_for(applied);
         assert_eq!((o.mode, o.flags, o.num_frames_to_generate, o.num_back_buffers), (1, 8, 3, 3));
         assert_eq!((o.mvec_depth_width, o.mvec_depth_height, o.color_width, o.color_height), (853, 480, 1280, 720));
@@ -1611,7 +1706,7 @@ mod tests {
 
     #[test]
     fn options_change_only_when_needed_and_frames_are_clamped() {
-        let on = Applied { on: true, frames: 1, render: UVec2::new(853, 480), output: UVec2::new(1280, 720), back_buffers: 3 };
+        let on = Applied { on: true, frames: 1, render: UVec2::new(853, 480), output: UVec2::new(1280, 720), back_buffers: 3, hdr: false };
         assert!(must_set(None, Applied { on: false, ..on }), "the first frame sets them");
         assert!(!must_set(Some(on), on));
         assert!(must_set(Some(on), Applied { on: false, ..on }));
@@ -1660,7 +1755,7 @@ mod tests {
     #[test]
     fn an_exit_sets_the_mode_off_once_whatever_ends_the_run() {
         let mut fg = FrameGen::new(dummy_get_state, counting_set_options, true);
-        fg.applied = Some(Applied { on: true, frames: 1, render: UVec2::new(853, 480), output: UVec2::new(1280, 720), back_buffers: 0 });
+        fg.applied = Some(Applied { on: true, frames: 1, render: UVec2::new(853, 480), output: UVec2::new(1280, 720), back_buffers: 0, hdr: false });
         assert!(exit_mode_off(&mut fg, "the run hands over to a new one"), "the first exit sets the mode off");
         assert_eq!(SET_CALLS.load(Ordering::SeqCst), 1);
         assert_eq!(SET_MODE.load(Ordering::SeqCst), DLSSG_MODE_OFF as i32);

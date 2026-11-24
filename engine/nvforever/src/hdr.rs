@@ -38,6 +38,10 @@ static PEAK_NITS: AtomicU32 = AtomicU32::new(0);
 static AUTO_PEAK: AtomicU32 = AtomicU32::new(0);
 /// The HDR row's choice that opens the calibration.
 const CALIBRATE: &str = "Calibrate...";
+/// The HDR row's choices.
+const OFF: &str = "Off";
+const HDR10: &str = "HDR10";
+const BIT16: &str = "HDR 16-bit";
 /// The peak used when neither the calibration nor Windows gives one.
 const FALLBACK_PEAK: u32 = 600;
 /// How far bright light keeps the SDR picture's hue, x1000 (the row's slider).
@@ -92,7 +96,7 @@ fn announce(mut last: Local<Option<(bool, bool)>>, messages: Option<ResMut<nvf_p
 pub(crate) const PAPER_MIN: u32 = 80;
 pub(crate) const PAPER_MAX: u32 = 400;
 pub(crate) const PEAK_MIN: u32 = 400;
-pub(crate) const PEAK_MAX: u32 = 4000;
+pub(crate) const PEAK_MAX: u32 = 10_000;
 
 /// Paper white in nits: how bright the picture's white and, with it, the HUD look.
 pub(crate) fn paper_nits() -> u32 {
@@ -124,20 +128,33 @@ pub(crate) fn set_peak_nits(nits: u32) {
     PEAK_NITS.store(if nits == 0 { 0 } else { nits.clamp(PEAK_MIN, PEAK_MAX) }, Relaxed);
 }
 
-/// The HDR row as the INI keeps it: `On` or `Off`, then the calibration (`peak=` 0 for the
-/// screen's own, `paper=`), as `On;peak=1000;paper=200`.
-fn hdr_saved() -> String {
-    format!("{};peak={};paper={}", if WANTED.load(Relaxed) { "On" } else { "Off" }, PEAK_NITS.load(Relaxed), paper_nits())
+/// The row's choice now: Off, HDR10 or 16-bit.
+fn choice() -> &'static str {
+    if !WANTED.load(Relaxed) {
+        OFF
+    } else if bevy::render::view::window::NVF_HDR_PQ_WANTED.load(Relaxed) {
+        HDR10
+    } else {
+        BIT16
+    }
 }
-/// The HDR row from its INI text ([`hdr_saved`]; a bare `1`, `true` or `on` as the old switch
-/// kept it); false when the first part is no on or off.
+
+/// The HDR row as the INI keeps it: `Off`, `HDR10` or `16-bit`, then the calibration (`peak=`
+/// 0 for the screen's own, `paper=`), as `HDR10;peak=1000;paper=200`.
+fn hdr_saved() -> String {
+    format!("{};peak={};paper={}", if choice() == BIT16 { "16-bit" } else { choice() }, PEAK_NITS.load(Relaxed), paper_nits())
+}
+/// The HDR row from its INI text ([`hdr_saved`]; `On`, a bare `1` or `true` as the old switch
+/// kept it load as HDR10); false when the first part is none of the choices.
 fn hdr_load(text: &str) -> bool {
     let mut parts = text.split(';').map(str::trim);
-    let on = match parts.next().map(str::to_ascii_lowercase).as_deref() {
-        Some("on" | "1" | "true") => true,
-        Some("off" | "0" | "false") => false,
+    let (on, pq) = match parts.next().map(str::to_ascii_lowercase).as_deref() {
+        Some("hdr10" | "on" | "1" | "true") => (true, true),
+        Some("16-bit" | "hdr 16-bit") => (true, false),
+        Some("off" | "0" | "false") => (false, true),
         _ => return false,
     };
+    bevy::render::view::window::NVF_HDR_PQ_WANTED.store(pq, Relaxed);
     set_wanted(on);
     for part in parts {
         match part.split_once('=').map(|(k, v)| (k.trim(), v.trim().parse::<u32>())) {
@@ -241,7 +258,7 @@ impl Plugin for HdrPlugin {
             }
         }
         if let Some(n) = std::env::var("NVF_HDR_PEAK").ok().and_then(|v| v.trim().parse::<u32>().ok()) {
-            PEAK_NITS.store(n.clamp(80, 4000), Relaxed);
+            PEAK_NITS.store(n.clamp(80, PEAK_MAX), Relaxed);
         }
         if std::env::var("NVF_HDR_HEATMAP").is_ok_and(|v| v.trim() == "1") {
             HEATMAP.store(true, Relaxed);
@@ -265,22 +282,21 @@ impl Plugin for HdrPlugin {
                 key: "hdr-output",
                 group: "Display",
                 label: "HDR output",
-                note: "On: the game is drawn for an HDR screen (Windows HDR on). Takes effect at once. Calibrate... sets the screen's peak and the brightness.",
+                note: "For an HDR screen (Windows HDR on), at once. HDR10: 10-bit, works with frame generation. HDR 16-bit: finer steps, no frame generation on Vulkan.",
                 switches: "",
                 get: |_| false,
                 set: |_, _| {},
                 slider: None,
             },
             ChoiceList {
-                names: |_| ["Off", "On", CALIBRATE].map(String::from).to_vec(),
-                chosen: |_| if WANTED.load(Relaxed) { "On" } else { "Off" }.to_string(),
-                pick: |w, name| match name {
-                    "On" | "Off" => {
-                        set_wanted(name == "On");
-                        true
-                    }
-                    CALIBRATE => {
-                        w.insert_resource(crate::hdr_calibrate::Asked);
+                names: |_| [OFF, HDR10, BIT16].map(String::from).to_vec(),
+                chosen: |_| choice().to_string(),
+                pick: |_, name| match name {
+                    OFF | HDR10 | BIT16 => {
+                        if name != OFF {
+                            bevy::render::view::window::NVF_HDR_PQ_WANTED.store(name == HDR10, Relaxed);
+                        }
+                        set_wanted(name != OFF);
                         true
                     }
                     _ => false,
@@ -290,7 +306,37 @@ impl Plugin for HdrPlugin {
                 ask_keep: false,
             },
         );
-        set_choice_action(app, "hdr-output", |name| name == CALIBRATE);
+        // Its own row under HDR output, greyed while HDR output is not active.
+        add_choice_list(
+            app,
+            Setting {
+                key: "hdr-calibrate",
+                group: "Display",
+                label: "Calibrate HDR",
+                note: "Two pictures that set the screen's peak and the brightness. Needs HDR output on.",
+                switches: "",
+                get: |_| false,
+                set: |_, _| {},
+                slider: None,
+            },
+            ChoiceList {
+                names: |_| vec![CALIBRATE.to_string()],
+                chosen: |_| CALIBRATE.to_string(),
+                pick: |w, name| {
+                    if name == CALIBRATE {
+                        w.insert_resource(crate::hdr_calibrate::Asked);
+                        true
+                    } else {
+                        false
+                    }
+                },
+                save: |_| String::new(),
+                load: |_, _| true,
+                ask_keep: false,
+            },
+        );
+        set_choice_action(app, "hdr-calibrate", |name| name == CALIBRATE);
+        nvf_play::settings::set_disabled_status(app, "hdr-calibrate", |_| (!bevy::render::view::window::NVF_HDR_SURFACE_ACTIVE.load(Relaxed)).then_some("Off (HDR output is off)"));
         if std::env::var("NVF_HDR").is_ok_and(|v| v.trim() == "1") {
             bevy::render::view::window::NVF_HDR_SURFACE.store(true, Relaxed);
         }
@@ -489,7 +535,7 @@ mod tests {
         assert_eq!(peak_nits(), 616);
         set_peak_nits(100);
         assert_eq!(peak_nits(), PEAK_MIN);
-        set_peak_nits(9000);
+        set_peak_nits(20_000);
         assert_eq!(peak_nits(), PEAK_MAX);
         set_peak_nits(0);
     }
@@ -502,13 +548,49 @@ mod tests {
         assert_eq!(paper_nits(), PAPER_MAX);
     }
 
+    /// The window blit's two outputs for an interface value `v` (1.0 = the HUD's white `hud`
+    /// nits): 16-bit scRGB (nits = value x 80) and HDR10 (PQ of the BT.2020 value), both after
+    /// the same gamma 2.2 step on 0..1 (`blit.wesl`); the PQ one decoded back to nits.
+    fn blit_nits(v: f32, hud: f32) -> (f32, f32) {
+        let enc = if v <= 0.003_130_8 { v * 12.92 } else { 1.055 * v.powf(1.0 / 2.4) - 0.055 };
+        let lin = if v <= 1.0 { enc.powf(2.2) } else { v };
+        let scrgb = lin * (hud / 80.0);
+        let (m1, m2, c1, c2, c3) = (0.159_301_76_f32, 78.84375_f32, 0.835_937_5_f32, 18.851_562_f32, 18.6875_f32);
+        let y = (scrgb * 80.0 / 10000.0).clamp(0.0, 1.0).powf(m1);
+        let pq = ((c1 + c2 * y) / (1.0 + c3 * y)).powf(m2);
+        let p = pq.powf(1.0 / m2);
+        let nits = 10000.0 * ((p - c1).max(0.0) / (c2 - c3 * p)).powf(1.0 / m1);
+        (scrgb * 80.0, nits)
+    }
+
     #[test]
-    fn the_row_keeps_on_and_the_calibration() {
-        assert!(hdr_load("On;peak=1200;paper=240"));
+    fn both_hdr_formats_give_the_calibration_the_same_nits() {
+        let paper = 200.0;
+        for nits in [10.0_f32, 200.0, 616.0, 10000.0, 0.01 * paper] {
+            let (scrgb, pq) = blit_nits(nits / paper, paper);
+            assert!((scrgb - pq).abs() <= scrgb * 0.01 + 1e-3, "{nits} nits: scRGB {scrgb}, PQ {pq}");
+            if nits >= paper {
+                assert!((scrgb - nits).abs() <= nits * 0.01, "{nits} nits: {scrgb}");
+            }
+        }
+        // 10,000 nits is scRGB 125.0 and PQ 1.0.
+        let (scrgb, _) = blit_nits(10000.0 / paper, paper);
+        assert!((scrgb / 80.0 - 125.0).abs() < 0.5);
+    }
+
+    #[test]
+    fn the_row_keeps_its_choice_and_the_calibration() {
+        assert!(hdr_load("On;peak=1200;paper=240"), "the old switch's text is HDR10");
         assert_eq!((WANTED.load(Relaxed), PEAK_NITS.load(Relaxed), paper_nits()), (true, 1200, 240));
-        assert_eq!(hdr_saved(), "On;peak=1200;paper=240");
+        assert_eq!(hdr_saved(), "HDR10;peak=1200;paper=240");
+        assert!(hdr_load("16-bit;peak=900"));
+        assert_eq!(hdr_saved(), "16-bit;peak=900;paper=240");
+        assert_eq!(choice(), BIT16);
+        assert!(hdr_load("HDR10"));
+        assert_eq!(choice(), HDR10);
         assert!(hdr_load("0"), "the old switch's text");
         assert!(!WANTED.load(Relaxed));
+        assert_eq!(choice(), OFF);
         assert!(!hdr_load("bright"));
         set_peak_nits(0);
         set_paper_nits(200);

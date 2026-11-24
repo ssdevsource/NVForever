@@ -26,5 +26,19 @@ fn fs_main(in: FullscreenVertexOutput) -> @location(0) vec4<f32> {
     // NVForever HDR output: scRGB's 1.0 is 80 nits; display-referred 1.0 goes to the HUD's white.
     @if(NVF_HDR_PAPER_WHITE)
     color = vec4(color.rgb * nvf_hdr_scale.x, color.a);
+    // NVForever HDR10: scRGB (Rec.709, 1.0 = 80 nits) to BT.2020 primaries and SMPTE ST 2084 PQ.
+    @if(NVF_HDR_PQ)
+    {
+        let rgb = max(color.rgb, vec3(0.0));
+        let p2020 = vec3(
+            dot(rgb, vec3(0.627404, 0.329283, 0.043313)),
+            dot(rgb, vec3(0.069097, 0.919540, 0.011362)),
+            dot(rgb, vec3(0.016391, 0.088013, 0.895595)));
+        let y = pow(clamp(p2020 * (80.0 / 10000.0), vec3(0.0), vec3(1.0)), vec3(0.1593017578125));
+        let pq = pow((0.8359375 + 18.8515625 * y) / (1.0 + 18.6875 * y), vec3(78.84375));
+        // Dither of +-0.5 code value of 10 bits (a hash of the pixel), so smooth skies do not band.
+        let h = fract(52.9829189 * fract(dot(in.position.xy, vec2(0.06711056, 0.00583715))));
+        color = vec4(clamp(pq + (h - 0.5) / 1023.0, vec3(0.0), vec3(1.0)), color.a);
+    }
     return color;
 }

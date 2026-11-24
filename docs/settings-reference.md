@@ -335,11 +335,22 @@ off by default, saved in `NVForever.ini` `[Settings]` [design: #3305]).
 
 ### `hdr-output`: HDR output
 
-- On the page: On: the game is drawn for an HDR screen (Windows HDR on). Takes effect at once.
-  Calibrate... sets the screen's peak and the brightness.
-- In full: A choice list: Off, On, Calibrate.... On draws the game in HDR on a screen with Windows
-  HDR on; with no HDR screen or no fp16 surface it stays SDR. It switches live, with no restart.
-  Calibrate... opens the calibration pictures for the screen's peak and the brightness.
+- On the page: For an HDR screen (Windows HDR on), at once. HDR10: 10-bit, works with frame
+  generation. HDR 16-bit: finer steps, no frame generation on Vulkan.
+- In full: A choice list: Off, HDR10, HDR 16-bit. HDR10 draws the game in HDR on a screen with
+  Windows HDR on (a 10-bit BT.2100 PQ surface, dithered; frame generation works). HDR 16-bit uses
+  an fp16 scRGB surface (finer steps; DLSS frame generation does not run on it on Vulkan). HDR10
+  falls back to 16-bit, logged, when the surface offers no HDR10; with no HDR screen it stays SDR.
+  It switches live, with no restart. An old `On` loads as HDR10.
+- More: docs/design/hdr-output.md
+- Registered in `engine/nvforever/src/hdr.rs`
+
+### `hdr-calibrate`: Calibrate HDR
+
+- On the page: Two pictures that set the screen's peak and the brightness. Needs HDR output on.
+- In full: A list with the one action Calibrate..., greyed while HDR output is not active. It opens
+  the calibration pictures (peak, then brightness) and keeps nothing itself; the peak and brightness
+  are kept in the `hdr-output` row. It works in both HDR10 and HDR 16-bit.
 - More: docs/design/hdr-output.md
 - Registered in `engine/nvforever/src/hdr.rs`
 

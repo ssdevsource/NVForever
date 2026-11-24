@@ -123,6 +123,8 @@ pub struct BlitPipelineKey {
     pub hdr: bool,
     /// NVForever HDR output: decode the 0..1 range with gamma 2.2 before the scale.
     pub hdr_gamma22: bool,
+    /// NVForever HDR output: the window is BT.2100 PQ (`Rgb10a2Unorm`): the scaled scRGB is converted to PQ.
+    pub hdr_pq: bool,
 }
 
 impl SpecializedRenderPipeline for BlitPipeline {
@@ -139,6 +141,9 @@ impl SpecializedRenderPipeline for BlitPipeline {
             shader_defs.push("NVF_HDR_PAPER_WHITE".into());
             if key.hdr_gamma22 {
                 shader_defs.push("NVF_HDR_GAMMA22".into());
+            }
+            if key.hdr_pq {
+                shader_defs.push("NVF_HDR_PQ".into());
             }
         }
 

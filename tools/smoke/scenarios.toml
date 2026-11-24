@@ -2421,7 +2421,7 @@ forbid = [{ text = "Caught rendering error", label = "a rendering (validation) e
 
 [[scenario]]
 name = "hdr-sdr-fallback"
-source = "docs/design/hdr-output.md: HDR asked for (NVF_HDR=1) on a surface with no Rgba16Float (forced by the test aid NVF_PLAY_TEST_SDR_SURFACE=1, so on any machine) stays SDR: the window says so, the corner text and log line say the screen offers no HDR, and no HDR surface is made"
+source = "docs/design/hdr-output.md: HDR asked for (NVF_HDR=1) on a surface with no Rgba16Float or HDR10 (forced by the test aid NVF_PLAY_TEST_SDR_SURFACE=1, so on any machine) stays SDR: the window says so, the corner text and log line say the screen offers no HDR, and no HDR surface is made"
 areas = ["renderer", "graphics", "settings"]
 paths = ["engine/nvforever/src/hdr.rs", "engine/nvforever/src/hdr_calibrate.rs", "engine/nvforever/src/hdr_expand.wesl", "engine/vendor/bevy_render/src/view/window/**", "engine/vendor/bevy_core_pipeline/src/blit/**", "engine/vendor/bevy_core_pipeline/src/upscaling/**"]
 env = { NVF_HDR = "1", NVF_PLAY_TEST_SDR_SURFACE = "1" }

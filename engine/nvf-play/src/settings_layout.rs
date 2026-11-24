@@ -308,7 +308,7 @@ mod tests {
     /// shadows row; #2981's authored materials row and its reflections row; #2701's
     /// full-detail scenery row; #3014's distant objects row; #2993's aerial perspective row;
     /// #2995's night sky detail row; #3013's distant lights row; #3322's terrain parallax row), by the group it registers with.
-    const KNOWN: [(&str, &str); 153] = [
+    const KNOWN: [(&str, &str); 154] = [
         ("detached-camera", "Gameplay"),
         ("gore-shake", "Gameplay"),
         ("advanced-movement", "Gameplay"),
@@ -374,6 +374,7 @@ mod tests {
         ("resolution", "Display"),
         ("borderless", "Display"),
         ("hdr-output", "Display"),
+        ("hdr-calibrate", "Display"),
         ("monitor", "Display"),
         ("first-person-body", "Display"),
         ("weapon-inertia", "Display"),

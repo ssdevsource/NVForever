@@ -39,9 +39,9 @@ pub struct Asked;
 const FIELD_PEAK_NITS: f32 = 10_000.0;
 /// The logo's brightness on the black picture, a part of paper white: about the game's
 /// darkest shadow detail (sRGB code 10 of 255, decoded) [design].
-const LOGO_DARK: f32 = 0.003;
+const LOGO_DARK: f32 = 0.01;
 /// One press's step, nits: the peak and the brightness [design].
-const PEAK_STEP: u32 = 50;
+const PEAK_STEP: u32 = 100;
 const PAPER_STEP: u32 = 10;
 /// The logo's box, interface units (the view is 960 high) [design].
 const LOGO_WIDTH: f32 = 560.0;

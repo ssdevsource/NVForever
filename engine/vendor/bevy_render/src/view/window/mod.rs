@@ -16,6 +16,10 @@ use bevy_log::{debug, info, warn};
 pub static NVF_HDR_SURFACE: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
 /// NVForever HDR output: the window's surface is fp16 scRGB now.
 pub static NVF_HDR_SURFACE_ACTIVE: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+/// NVForever HDR output: the HDR row asks for HDR10 (`Rgb10a2Unorm`, BT.2100 PQ) rather than 16-bit scRGB.
+pub static NVF_HDR_PQ_WANTED: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(true);
+/// NVForever HDR output: the HDR surface is `Rgb10a2Unorm` in BT.2100 PQ, not fp16 scRGB.
+pub static NVF_HDR_PQ: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
 /// NVForever HDR output: a window's surface has been made, so `NVF_HDR_SURFACE_ACTIVE` holds.
 pub static NVF_HDR_SURFACE_DECIDED: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
 use bevy_utils::default;
@@ -438,6 +442,8 @@ pub struct SurfaceData {
     /// NVForever HDR output: the surface's SDR format, and whether it offers fp16.
     nvf_sdr_format: TextureFormat,
     nvf_fp16: bool,
+    /// The surface offers `Rgb10a2Unorm` with BT.2100 PQ.
+    nvf_pq: bool,
     texture_view_format: Option<TextureFormat>,
     /// NVForever (2026-11-08): the configuration as [`SharedSurface`] holders see it, and the
     /// lock they take the surface's images under. NVForever (2026-11-09): with whether a holder
@@ -461,8 +467,25 @@ impl SurfaceData {
 
     /// NVForever HDR output: the HDR row asks for a surface other than the one this has.
     fn nvf_hdr_changed(&self) -> bool {
-        let want = NVF_HDR_SURFACE.load(core::sync::atomic::Ordering::Relaxed) && self.nvf_fp16;
-        want != (self.configuration.format == TextureFormat::Rgba16Float)
+        match self.nvf_hdr_format() {
+            Some(format) => self.configuration.format != format,
+            None => matches!(self.configuration.format, TextureFormat::Rgba16Float | TextureFormat::Rgb10a2Unorm),
+        }
+    }
+
+    /// NVForever HDR output: the HDR surface format the row asks for (HDR10 when the surface
+    /// offers it, else 16-bit scRGB), `None` for SDR.
+    fn nvf_hdr_format(&self) -> Option<TextureFormat> {
+        use core::sync::atomic::Ordering::Relaxed;
+        if !NVF_HDR_SURFACE.load(Relaxed) {
+            None
+        } else if self.nvf_pq && NVF_HDR_PQ_WANTED.load(Relaxed) {
+            Some(TextureFormat::Rgb10a2Unorm)
+        } else if self.nvf_fp16 {
+            Some(TextureFormat::Rgba16Float)
+        } else {
+            None
+        }
     }
 
     /// NVForever (2026-11-13): whether [`create_surfaces`] would reconfigure the surface this
@@ -669,6 +692,8 @@ pub fn create_surfaces(
             // Test aid `NVF_PLAY_TEST_SDR_SURFACE=1`: the surface counts as offering no fp16,
             // so HDR asked for stays SDR on any machine (smoke `hdr-sdr-fallback`).
             let nvf_fp16 = caps.formats.contains(&TextureFormat::Rgba16Float) && !std::env::var("NVF_PLAY_TEST_SDR_SURFACE").is_ok_and(|v| v.trim() == "1");
+            let nvf_pq = !std::env::var("NVF_PLAY_TEST_SDR_SURFACE").is_ok_and(|v| v.trim() == "1")
+                && caps.format_capabilities.iter().any(|c| c.format == TextureFormat::Rgb10a2Unorm && c.color_spaces.contains(wgpu::SurfaceColorSpaces::BT2100_PQ));
             let nvf_hdr = NVF_HDR_SURFACE.load(core::sync::atomic::Ordering::Relaxed) || std::env::var("NVF_HDR").is_ok_and(|v| v.trim() == "1");
             if nvf_hdr {
                 info!("hdr: surface offers {:?}", caps.format_capabilities);
@@ -689,12 +714,24 @@ pub fn create_surfaces(
             }
 
             // NVForever HDR output: the SDR format, for a live switch back from HDR.
-            let nvf_sdr_format = format;
+            // Its non-sRGB form, viewed as sRGB (as the live switch sets `texture_view_format`):
+            // Streamline's DLSS-G refuses an sRGB swapchain format, so switching HDR off must not
+            // come back as one.
+            let nvf_sdr_format = format.remove_srgb_suffix();
             // NVForever HDR output (nvforever hdr.rs): with `NVF_HDR=1`, an fp16 surface,
             // which `SurfaceColorSpace::Auto` makes scRGB (extended linear sRGB).
             NVF_HDR_SURFACE_ACTIVE.store(false, core::sync::atomic::Ordering::Relaxed);
+            NVF_HDR_PQ.store(false, core::sync::atomic::Ordering::Relaxed);
             if nvf_hdr {
-                if nvf_fp16 {
+                if nvf_pq && NVF_HDR_PQ_WANTED.load(core::sync::atomic::Ordering::Relaxed) {
+                    format = TextureFormat::Rgb10a2Unorm;
+                    NVF_HDR_SURFACE_ACTIVE.store(true, core::sync::atomic::Ordering::Relaxed);
+                    NVF_HDR_PQ.store(true, core::sync::atomic::Ordering::Relaxed);
+                    bevy_log::info!("hdr: window surface Rgb10a2Unorm (BT.2100 PQ)");
+                } else if nvf_fp16 {
+                    if NVF_HDR_PQ_WANTED.load(core::sync::atomic::Ordering::Relaxed) {
+                        bevy_log::warn!("hdr: this surface offers no Rgb10a2Unorm with BT.2100 PQ; HDR10 falls back to 16-bit");
+                    }
                     format = TextureFormat::Rgba16Float;
                     NVF_HDR_SURFACE_ACTIVE.store(true, core::sync::atomic::Ordering::Relaxed);
                     bevy_log::info!("hdr: window surface Rgba16Float (scRGB)");
@@ -703,7 +740,7 @@ pub fn create_surfaces(
                 }
             }
             NVF_HDR_SURFACE_DECIDED.store(true, core::sync::atomic::Ordering::Relaxed);
-            let texture_view_format = if !format.is_srgb() {
+            let texture_view_format = if !format.is_srgb() && format != TextureFormat::Rgb10a2Unorm {
                 Some(format.add_srgb_suffix())
             } else {
                 None
@@ -729,7 +766,7 @@ pub fn create_surfaces(
                     Some(format) => vec![format],
                     None => vec![],
                 },
-                color_space: wgpu::SurfaceColorSpace::Auto,
+                color_space: if NVF_HDR_PQ.load(core::sync::atomic::Ordering::Relaxed) { wgpu::SurfaceColorSpace::Bt2100Pq } else { wgpu::SurfaceColorSpace::Auto },
             };
 
             render_device.configure_surface(&surface, &configuration);
@@ -747,6 +784,7 @@ pub fn create_surfaces(
                 texture_view_format,
                 nvf_sdr_format,
                 nvf_fp16,
+                nvf_pq,
             });
             continue;
         };
@@ -777,13 +815,17 @@ pub fn create_surfaces(
             // NVForever HDR output: the HDR row changed: the surface takes fp16 scRGB or its SDR
             // format again, with no restart (nvforever hdr.rs).
             if nvf_hdr_changed {
-                let hdr = NVF_HDR_SURFACE.load(core::sync::atomic::Ordering::Relaxed) && data.nvf_fp16;
-                let format = if hdr { TextureFormat::Rgba16Float } else { data.nvf_sdr_format };
+                let target = data.nvf_hdr_format();
+                let hdr = target.is_some();
+                let pq = target == Some(TextureFormat::Rgb10a2Unorm);
+                let format = target.unwrap_or(data.nvf_sdr_format);
                 data.configuration.format = format;
-                data.texture_view_format = (!format.is_srgb()).then(|| format.add_srgb_suffix());
+                data.configuration.color_space = if pq { wgpu::SurfaceColorSpace::Bt2100Pq } else { wgpu::SurfaceColorSpace::Auto };
+                NVF_HDR_PQ.store(pq, core::sync::atomic::Ordering::Relaxed);
+                data.texture_view_format = (!format.is_srgb() && format != TextureFormat::Rgb10a2Unorm).then(|| format.add_srgb_suffix());
                 data.configuration.view_formats = data.texture_view_format.into_iter().collect();
                 NVF_HDR_SURFACE_ACTIVE.store(hdr, core::sync::atomic::Ordering::Relaxed);
-                bevy_log::info!("hdr: window surface now {format:?} ({})", if hdr { "scRGB" } else { "SDR" });
+                bevy_log::info!("hdr: window surface now {format:?} ({})", if pq { "PQ" } else if hdr { "scRGB" } else { "SDR" });
             }
             // NVForever (2026-11-08): not while a thread holding the surface takes or presents.
             let mut shared = data.shared.configuration.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
